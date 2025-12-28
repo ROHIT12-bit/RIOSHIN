@@ -24,6 +24,7 @@ You can deploy this bot on Render using the provided `render.yaml` and `Dockerfi
    - `MONGO_URI`: Your MongoDB connection string.
    - `FORCE_SUB_CHANNEL`: (Optional) The username of the channel that users must join before being approved (e.g., `@mychannel`).
    - `LOG_CHANNEL_ID`: (Optional) The ID of the channel where the bot should send log messages.
+   - `START_IMAGE_URL`: (Optional) A URL to an image to be displayed in the `/start` message.
 
 ## Commands
 
@@ -37,7 +38,7 @@ You can deploy this bot on Render using the provided `render.yaml` and `Dockerfi
 - `/userid` - Get your user ID
 - `/approved` - View approved users count
 - `/stats` - Bot usage & approval stats
-- `/users` - Total users count
+- `/users` - Get the total number of approved users in the database
 - `/banned` - View banned users list
 
 ### Admin Commands

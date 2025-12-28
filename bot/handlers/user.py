@@ -1,7 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from bot import database
+from bot import database, config
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a message when the command /start is issued."""
@@ -10,7 +10,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("Commands", callback_data="commands")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Hi! I'm a bot that automatically approves new members.", reply_markup=reply_markup)
+    await update.message.reply_photo(
+        photo=config.START_IMAGE_URL,
+        caption="Hi! I'm a bot that automatically approves new members.",
+        reply_markup=reply_markup
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -28,6 +32,7 @@ Here are the available commands:
 /approved - View approved users count
 /stats - Bot usage & approval stats
 /banned - View banned users list
+/users - Get the total number of approved users in the database
 
 Admin commands:
 /approve <user_id> - Manually approve a user
@@ -90,3 +95,9 @@ async def view_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Displays info about the bot."""
     await update.message.reply_text("This is a Telegram bot that automatically approves new members in a chat.")
+
+
+async def total_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Get the total number of approved users."""
+    count = database.approved_users.count_documents({})
+    await update.message.reply_text(f"Total approved users in the database: {count}")

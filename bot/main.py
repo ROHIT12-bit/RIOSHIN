@@ -29,6 +29,18 @@ async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not settings or not settings.get("auto_approve_enabled", True):
         return
 
+    new_member = update.effective_user
+    if not new_member:
+        return
+
+    # Check if user is banned or blacklisted
+    if database.banned_users.find_one({"user_id": new_member.id}) or \
+       database.blacklist.find_one({"user_id": new_member.id}):
+        logger.info(f"User {new_member.id} is banned or blacklisted, declining join request.")
+        await update.chat_join_request.decline()
+        await log_message("auto_decline_banned", user_id=new_member.id, context=context)
+        return
+
     # Force sub
     if config.FORCE_SUB_CHANNEL:
         try:
@@ -63,16 +75,14 @@ async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
     chat_id = update.effective_chat.id
-    new_member = update.effective_user
 
-    if new_member:
-        await update.chat_join_request.approve()
-        database.approved_users.insert_one({"user_id": new_member.id})
-        database.stats.update_one({}, {"$inc": {"approved": 1}}, upsert=True)
-        await log_message("auto_approve", user_id=new_member.id, context=context)
-        await context.bot.send_message(
-            chat_id, f"Welcome {new_member.mention_html()}! Your join request has been approved."
-        )
+    await update.chat_join_request.approve()
+    database.approved_users.insert_one({"user_id": new_member.id})
+    database.stats.update_one({}, {"$inc": {"approved": 1}}, upsert=True)
+    await log_message("auto_approve", user_id=new_member.id, context=context)
+    await context.bot.send_message(
+        chat_id, f"Welcome {new_member.mention_html()}! Your join request has been approved."
+    )
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,6 +115,7 @@ def main() -> None:
     application.add_handler(CommandHandler("approved", user.approved_users_count))
     application.add_handler(CommandHandler("stats", user.bot_stats))
     application.add_handler(CommandHandler("banned", user.view_banned_users))
+    application.add_handler(CommandHandler("users", user.total_users))
 
     # Admin commands
     application.add_handler(CommandHandler("approve", admin.approve))

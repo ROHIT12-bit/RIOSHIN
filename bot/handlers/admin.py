@@ -1,9 +1,12 @@
+import logging
 from functools import wraps
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot import config, database
 from bot.logging import log_message
+
+logger = logging.getLogger(__name__)
 
 def admin_only(func):
     @wraps(func)
@@ -173,7 +176,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await context.bot.send_message(chat_id=user["user_id"], text=message)
         except Exception as e:
-            print(f"Failed to send message to {user['user_id']}: {e}")
+            logger.error(f"Failed to send message to {user['user_id']}: {e}")
 
     database.stats.update_one({}, {"$inc": {"broadcasts": 1}}, upsert=True)
     await log_message("broadcast", details=f"Broadcast sent by {update.effective_user.id}", context=context)
