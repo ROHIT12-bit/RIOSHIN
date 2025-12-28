@@ -12,14 +12,15 @@ async def log_message(action: str, user_id: int = None, details: str = "", conte
     }
     database.logs.insert_one(log_entry)
 
-    if config.LOG_CHANNEL_ID:
-        message = f"Action: {action}\n"
+    if config.LOG_CHAT_ID and config.LOG_CHAT_ID != 0 and context:
+        message = f"#{action}\n"
         if user_id:
-            message += f"User ID: {user_id}\n"
+            message += f"User ID: `{user_id}`\n"
         if details:
             message += f"Details: {details}\n"
 
         try:
-            await context.bot.send_message(chat_id=config.LOG_CHANNEL_ID, text=message)
+            await context.bot.send_message(chat_id=config.LOG_CHAT_ID, text=message)
         except Exception as e:
-            print(f"Failed to send log message to channel: {e}")
+            # Avoid logging this error to prevent a potential loop
+            print(f"Failed to send log message to channel {config.LOG_CHAT_ID}: {e}")

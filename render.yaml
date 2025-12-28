@@ -1,18 +1,22 @@
+# This file configures the deployment on Render.
+# It is set up to use Docker, so Render will automatically build the image
+# from the Dockerfile and run it.
 services:
   - type: worker
     name: telegram-auto-approval-bot
-    env: python
-    pythonVersion: "3.11"
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python bot/main.py"
+    env: docker
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN
         sync: false
       - key: ADMIN_USER_IDS
         sync: false
       - key: MONGO_URI
         sync: false
-      - key: FORCE_SUB_CHANNEL
+      - key: API_ID
         sync: false
-      - key: LOG_CHANNEL_ID
+      - key: API_HASH
+        sync: false
+      - key: FORCE_SUB_CHANNELS
+        sync: false
+      - key: LOG_CHAT_ID
         sync: false

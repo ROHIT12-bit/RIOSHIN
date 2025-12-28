@@ -1,6 +1,7 @@
 import logging
+import asyncio
 from datetime import datetime, timedelta
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -23,8 +24,144 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def get_user_join_status(
+    channel: str, user_id: int, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[str, bool]:
+    """Checks if a user has joined a specific channel."""
+    try:
+        member = await context.bot.get_chat_member(f"@{channel}", user_id)
+        return channel, member.status in ["member", "administrator", "creator"]
+    except Exception as e:
+        logger.error(f"Error checking status for @{channel}: {e}")
+        # Fail open: If the check fails, assume the user has joined to avoid blocking.
+        return channel, True
+
+
+async def handle_force_sub(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int
+) -> None:
+    """
+    Sends a message to the user with a list of channels to join and a button
+    to confirm they have joined.
+    """
+    # Check membership status for all force-sub channels concurrently
+    tasks = [
+        get_user_join_status(channel, user_id, context)
+        for channel in config.FORCE_SUB_CHANNELS
+    ]
+    results = await asyncio.gather(*tasks)
+
+    unjoined_channels = [channel for channel, joined in results if not joined]
+
+    if not unjoined_channels:
+        # If all channels are joined, finalize the approval
+        await finalize_approval(update, context)
+        return
+
+    # Build the UI with channel links and status indicators
+    keyboard = []
+    for channel, joined in results:
+        status_icon = "✅" if joined else "❌"
+        status_text = f"{status_icon} Joined" if joined else f"{status_icon} Not Joined"
+        row = [InlineKeyboardButton(status_text, callback_data=f"status_{channel}")]
+
+        if not joined:
+            row.append(
+                InlineKeyboardButton(
+                    f"Join '{channel}'", url=f"https://t.me/{channel}"
+                )
+            )
+        keyboard.append(row)
+
+    # Add the final confirmation button
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "✅ I have joined", callback_data="check_join_status"
+            )
+        ]
+    )
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(
+        user_id,
+        "You must join our channel(s) to be approved. Please join the channels below and then click the button.",
+        reply_markup=reply_markup,
+    )
+
+
+async def check_join_status_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Handles the '✅ I have joined' button press. Re-checks channel memberships
+    and either approves the user or updates the message.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    tasks = [
+        get_user_join_status(channel, user_id, context)
+        for channel in config.FORCE_SUB_CHANNELS
+    ]
+    results = await asyncio.gather(*tasks)
+    all_joined = all(joined for _, joined in results)
+
+    if all_joined:
+        # Use the original chat_join_request from user_data
+        join_request_update = context.user_data.get(user_id, {}).get(
+            "chat_join_request"
+        )
+        if join_request_update:
+            await query.message.delete()
+            await finalize_approval(join_request_update, context)
+        else:
+            await query.message.edit_text(
+                "Could not find original join request. Please try requesting to join the chat again."
+            )
+    else:
+        # If they still haven't joined all channels, update the message
+        await query.answer(
+            "You haven't joined all the required channels yet. Please try again.",
+            show_alert=True,
+        )
+        # Re-send the message with updated statuses
+        await query.message.delete()
+        # We need the original update object to pass to handle_force_sub
+        join_request_update = context.user_data.get(user_id, {}).get(
+            "chat_join_request"
+        )
+        if join_request_update:
+            await handle_force_sub(join_request_update, context, user_id)
+
+
+async def finalize_approval(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handles the final steps of approving a user."""
+    new_member = update.effective_user
+    chat_id = update.effective_chat.id
+
+    await update.chat_join_request.approve()
+    database.approved_users.insert_one({"user_id": new_member.id})
+    database.stats.update_one({}, {"$inc": {"approved": 1}}, upsert=True)
+    await log_message("auto_approve", user_id=new_member.id, context=context)
+
+    if config.SEND_WELCOME_IN_CHAT:
+        await context.bot.send_message(
+            chat_id,
+            f"Welcome {new_member.mention_html()}! Your join request has been approved.",
+        )
+    # Clean up user_data
+    if new_member.id in context.user_data:
+        del context.user_data[new_member.id]
+
+
 async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Welcomes new members to the chat and approves them."""
+    """
+    Handles new chat join requests. It checks for bans, blacklists, and then
+    triggers the force-subscribe flow if enabled.
+    """
     settings = database.settings.find_one()
     if not settings or not settings.get("auto_approve_enabled", True):
         return
@@ -33,56 +170,29 @@ async def auto_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not new_member:
         return
 
+    # Store the update object to be used later in the callback
+    context.user_data[new_member.id] = {"chat_join_request": update}
+
     # Check if user is banned or blacklisted
-    if database.banned_users.find_one({"user_id": new_member.id}) or \
-       database.blacklist.find_one({"user_id": new_member.id}):
-        logger.info(f"User {new_member.id} is banned or blacklisted, declining join request.")
+    if database.banned_users.find_one(
+        {"user_id": new_member.id}
+    ) or database.blacklist.find_one({"user_id": new_member.id}):
+        logger.info(
+            f"User {new_member.id} is banned or blacklisted, declining join request."
+        )
         await update.chat_join_request.decline()
-        await log_message("auto_decline_banned", user_id=new_member.id, context=context)
+        await log_message(
+            "auto_decline_banned", user_id=new_member.id, context=context
+        )
         return
 
-    # Force sub
-    if config.FORCE_SUB_CHANNEL:
-        try:
-            member = await context.bot.get_chat_member(config.FORCE_SUB_CHANNEL, update.effective_user.id)
-            if member.status not in ["member", "administrator", "creator"]:
-                await context.bot.send_message(
-                    update.effective_chat.id,
-                    f"You must join our channel to be approved. Please join {config.FORCE_SUB_CHANNEL} and then request to join again."
-                )
-                return
-        except Exception as e:
-            logger.error(f"Error checking chat member status: {e}")
-            return
-
-    # Check cooldown
-    cooldown_period = settings.get("cooldown_period", 0)
-    last_approval = database.logs.find_one({"action": "auto_approve"}, sort=[("timestamp", -1)])
-    if last_approval and last_approval.get("timestamp") and last_approval["timestamp"] + timedelta(seconds=cooldown_period) > datetime.now():
+    # If force sub is disabled, approve immediately
+    if not config.FORCE_SUB_CHANNELS:
+        await finalize_approval(update, context)
         return
 
-    # Check daily limit
-    daily_limit = settings.get("daily_approval_limit", 0)
-    if daily_limit > 0:
-        today = datetime.now().date()
-        start_of_day = datetime.combine(today, datetime.min.time())
-        end_of_day = datetime.combine(today, datetime.max.time())
-        approvals_today = database.logs.count_documents({
-            "action": "auto_approve",
-            "timestamp": {"$gte": start_of_day, "$lt": end_of_day}
-        })
-        if approvals_today >= daily_limit:
-            return
-
-    chat_id = update.effective_chat.id
-
-    await update.chat_join_request.approve()
-    database.approved_users.insert_one({"user_id": new_member.id})
-    database.stats.update_one({}, {"$inc": {"approved": 1}}, upsert=True)
-    await log_message("auto_approve", user_id=new_member.id, context=context)
-    await context.bot.send_message(
-        chat_id, f"Welcome {new_member.mention_html()}! Your join request has been approved."
-    )
+    # Start the force-subscribe flow
+    await handle_force_sub(update, context, new_member.id)
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -95,15 +205,34 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     if query.data == "help":
-        await query.edit_message_text(text=user.help_command.help_text)
-    elif query.data == "commands":
-        await query.edit_message_text(text=user.help_command.help_text)
+        await query.edit_message_text(text=user.HELP_TEXT)
+
+
+def initialize_settings() -> None:
+    """Initializes bot settings in the database from the config file."""
+    logger.info("Initializing bot settings...")
+    settings = database.settings.find_one()
+    if not settings:
+        database.settings.insert_one({
+            "auto_approve_enabled": config.AUTO_APPROVE_INSTANT
+        })
+        logger.info(f"Auto-approval set to: {config.AUTO_APPROVE_INSTANT}")
+    else:
+        logger.info("Settings already initialized.")
 
 
 def main() -> None:
     """Start the bot."""
+    # --- Check for essential configurations ---
+    if not all([config.BOT_TOKEN, config.API_ID, config.API_HASH, config.MONGO_URI]):
+        logger.critical(
+            "BOT_TOKEN, API_ID, API_HASH, and MONGO_URI must be set in the environment variables. "
+            "Please check your configuration."
+        )
+        return
+
     # Create the Application and pass it your bot's token.
-    application = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
+    application = ApplicationBuilder().token(config.BOT_TOKEN).build()
 
     # User commands
     application.add_handler(CommandHandler("start", user.start))
@@ -112,7 +241,6 @@ def main() -> None:
     application.add_handler(CommandHandler("echo", user.echo))
     application.add_handler(CommandHandler("chatid", user.chat_id))
     application.add_handler(CommandHandler("userid", user.user_id))
-    application.add_handler(CommandHandler("approved", user.approved_users_count))
     application.add_handler(CommandHandler("stats", user.bot_stats))
     application.add_handler(CommandHandler("banned", user.view_banned_users))
     application.add_handler(CommandHandler("users", user.total_users))
@@ -131,7 +259,10 @@ def main() -> None:
     application.add_handler(CommandHandler("unban", admin.unban))
 
     # Other handlers
-    application.add_handler(CallbackQueryHandler(button))
+    application.add_handler(CallbackQueryHandler(button, pattern="^help$"))
+    application.add_handler(
+        CallbackQueryHandler(check_join_status_callback, pattern="^check_join_status$")
+    )
     application.add_handler(ChatJoinRequestHandler(auto_approve))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
@@ -140,4 +271,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    initialize_settings()
     main()
